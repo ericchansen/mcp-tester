@@ -8,11 +8,14 @@
 
 ## TL;DR
 
-Copilot CLI **partially supports** `notifications/tools/list_changed`:
+Copilot CLI **fully supports** `notifications/tools/list_changed` for multi-turn use:
 - ✅ It re-fetches `tools/list` after receiving the notification (protocol-compliant)
-- ❌ It does **not** surface the updated tool list to the LLM mid-turn (the LLM cannot call newly-registered tools)
+- ✅ On the **next turn**, the LLM sees and can call dynamically-registered tools
+- ❌ It does **not** surface the updated tool list to the LLM **mid-turn** (same-turn mutations are invisible)
 
-This is **not** "ignoring the notification" — it's an architectural limitation where the LLM's tool schema is frozen at turn start and not updated mid-inference.
+This is **not** "ignoring the notification" — the client is fully protocol-compliant. The only limitation is that the LLM's tool schema is frozen within a single inference turn, which is expected behavior.
+
+**Bottom line: Dynamic tool registration works across turns. A gateway like `msx_expand` IS viable if designed as a two-turn flow (turn 1: expand → turn 2: use new tools).**
 
 ## Evidence Table (Automated Analysis)
 
@@ -34,27 +37,35 @@ This is **not** "ignoring the notification" — it's an architectural limitation
 
 Per the PROTOCOL.md interpretation guide:
 
-> **Q8 yes + Q10 no**: Client refreshes but doesn't re-prompt LLM with new tools mid-session — partial support.
+> **Q8 yes + Q10 no** (single-turn): Client refreshes internal registry but LLM can't see new tools mid-inference.
 
-The client's MCP transport layer is fully spec-compliant: it receives the notification, immediately re-fetches `tools/list`, and gets the updated list (including `mcptester_probe_beta`). However, the LLM orchestration layer does not propagate the updated tool definitions to the model's current turn. The model continues with its stale tool schema.
+The client's MCP transport layer is fully spec-compliant: it receives the notification, immediately re-fetches `tools/list`, and gets the updated list (including `mcptester_probe_beta`). Within the same turn, the model can't call the new tool. But on the **next turn**, it can.
+
+## Multi-Turn Experiment (Interactive Mode)
+
+| # | Question | Answer | Evidence |
+|---|----------|--------|----------|
+| 1 | Did mutation happen in turn 1? | yes | tools/call mcptester_mutate_tools at T+01:33:43 |
+| 2 | Did client re-fetch tools/list after notification? | yes | tools/list at T+01:33:43 (same as single-turn) |
+| 3 | Did client call mcptester_probe_beta in turn 2? | **YES** | tools/call mcptester_probe_beta at T+01:38:44 |
+| 4 | Did server confirm beta execution? | yes | "beta called at 2026-05-06T01:38:44.894Z" |
+
+**Conclusion:** Dynamic tool registration is fully functional across turns. The client's updated internal registry IS surfaced to the LLM at the start of the next turn.
 
 ## Implications for PR #321 (`msx_expand`)
 
 The original PR #321 claim was:
 > "Copilot CLI caches `tools/list` at session start and ignores `notifications/tools/list_changed`"
 
-**This claim is partially wrong.** The client does NOT ignore the notification — it processes it and updates its internal registry. The limitation is:
-
-1. **Mid-turn mutations are invisible to the LLM.** If a tool call triggers `list_changed`, the new tools won't be usable in the same turn.
-2. **Cross-turn visibility is untested** in this experiment (non-interactive mode = single turn). An interactive session might surface new tools on the next turn.
+**This claim is wrong.** The client honors the notification, updates its registry, and surfaces new tools on the next turn. A dynamic gateway IS viable.
 
 ### What this means for dynamic tool surfacing:
 
 | Architecture | Would it work? |
 |---|---|
-| Gateway that hides tools and surfaces them mid-turn via `list_changed` | ❌ No — LLM can't see them until next turn |
-| Gateway that pre-surfaces tools at turn start based on context/routing | ✅ Potentially — if mutation happens before LLM inference begins |
-| Pre-registering all tools but using description/routing to guide selection | ✅ Yes — tools are always visible, selection is emergent |
+| Gateway that hides tools and surfaces them mid-turn via `list_changed` | ⚠️ Partially — new tools visible next turn, not same turn |
+| Two-turn flow: turn 1 "expand X" → turn 2 uses new tools | ✅ Yes — fully supported |
+| Pre-registering all tools with description-based routing | ✅ Yes — tools are always visible, selection is emergent |
 
 ## Raw Protocol Timeline
 
